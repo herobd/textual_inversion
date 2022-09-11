@@ -20,8 +20,10 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
+import cv2
+import os
 
-def load_model_from_config(config, ckpt, verbose=False):
+def load_model_from_config(config, ckpt, verbose=False,cpu=False):
     print(f"Loading model from {ckpt}")
     pl_sd = torch.load(ckpt, map_location="cpu")
     sd = pl_sd["state_dict"]
@@ -34,8 +36,8 @@ def load_model_from_config(config, ckpt, verbose=False):
     if len(u) > 0 and verbose:
         print("unexpected keys:")
         print(u)
-
-    model.cuda()
+    if not cpu:
+        model.cuda()
     return model
 
 def get_parser(**parser_kwargs):
@@ -346,7 +348,7 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            pl.loggers.CSVLogger: self._testtube,
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
@@ -363,10 +365,16 @@ class ImageLogger(Callback):
             grid = torchvision.utils.make_grid(images[k])
             grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
 
+
             tag = f"{split}/{k}"
-            pl_module.logger.experiment.add_image(
-                tag, grid,
-                global_step=pl_module.global_step)
+            #pl_module.logger.experiment.add_image(
+            #    tag, grid,
+            #    global_step=pl_module.global_step)
+            grid*=255
+            grid=grid.permute(1,2,0)
+            grid = grid.numpy().astype(np.uint8)
+            tag = f"{split}_{k}.png"
+            cv2.imwrite(os.path.join('training_out',tag),grid)
 
     @rank_zero_only
     def log_local(self, save_dir, split, images,
@@ -402,6 +410,7 @@ class ImageLogger(Callback):
 
             with torch.no_grad():
                 images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+            images = images.detach()
 
             for k in images:
                 N = min(images[k].shape[0], self.max_images)
@@ -431,11 +440,11 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
@@ -579,7 +588,7 @@ if __name__ == "__main__":
     cfgdir = os.path.join(logdir, "configs")
     seed_everything(opt.seed)
 
-    try:
+    if True:
         # init and save configs
         configs = [OmegaConf.load(cfg) for cfg in opt.base]
         cli = OmegaConf.from_dotlist(unknown)
@@ -611,7 +620,7 @@ if __name__ == "__main__":
             config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
 
         if opt.actual_resume:
-            model = load_model_from_config(config, opt.actual_resume)
+            model = load_model_from_config(config, opt.actual_resume,cpu=cpu)
         else:
             model = instantiate_from_config(config.model)
 
@@ -630,7 +639,7 @@ if __name__ == "__main__":
                 }
             },
             "testtube": {
-                "target": "pytorch_lightning.loggers.TestTubeLogger",
+                "target": "pytorch_lightning.loggers.CSVLogger",
                 "params": {
                     "name": "testtube",
                     "save_dir": logdir,
@@ -643,6 +652,8 @@ if __name__ == "__main__":
         else:
             logger_cfg = OmegaConf.create()
         logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+        if 'TestTubeLogger' in logger_cfg['target']:
+            logger_cfg['target']='pytorch_lightning.loggers.CSVLogger'
         trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
 
         # modelcheckpoint - use TrainResult/EvalResult(checkpoint_on=metric) to
@@ -699,10 +710,12 @@ if __name__ == "__main__":
                     # "log_momentum": True
                 }
             },
-            "cuda_callback": {
-                "target": "main.CUDACallback"
-            },
+            #"cuda_callback": {
+            #    "target": "main.CUDACallback"
+            #},
         }
+        if not cpu:
+            default_callbacks_cfg['cuda_callback']={"target": "main.CUDACallback"}
         if version.parse(pl.__version__) >= version.parse('1.4.0'):
             default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
 
@@ -735,6 +748,9 @@ if __name__ == "__main__":
         elif 'ignore_keys_callback' in callbacks_cfg:
             del callbacks_cfg['ignore_keys_callback']
 
+        for v in callbacks_cfg.values():
+            if v['target']=='pytorch_lightning.loggers.TestTubeLogger':
+                v['target']='pytorch_lightning.loggers.CSVLogger'
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
         trainer_kwargs["max_steps"] = trainer_opt.max_steps
 
@@ -808,15 +824,15 @@ if __name__ == "__main__":
                 raise
         if not opt.no_test and not trainer.interrupted:
             trainer.test(model, data)
-    except Exception:
-        if opt.debug and trainer.global_rank == 0:
-            try:
-                import pudb as debugger
-            except ImportError:
-                import pdb as debugger
-            debugger.post_mortem()
-        raise
-    finally:
+    #except Exception:
+    #    if opt.debug and trainer.global_rank == 0:
+    #        try:
+    #            import pudb as debugger
+    #        except ImportError:
+    #            import pdb as debugger
+    #        debugger.post_mortem()
+    #    raise
+    #finally:
         # move newly created debug project to debug_runs
         if opt.debug and not opt.resume and trainer.global_rank == 0:
             dst, name = os.path.split(logdir)
