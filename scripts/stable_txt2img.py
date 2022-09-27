@@ -158,7 +158,7 @@ def main():
     parser.add_argument(
         "--ckpt",
         type=str,
-        default="models/ldm/stable-diffusion-v1/model.ckpt",
+        default=None,
         help="path to checkpoint of model",
     )    
     parser.add_argument(
@@ -193,6 +193,8 @@ def main():
         seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
+    if args.ckpt is not None:
+        config.ckpt_path = args.ckpt
     model = load_model_from_config(config, f"{opt.ckpt}")
     model.embedding_manager.load(opt.embedding_path)
 
