@@ -37,7 +37,7 @@ def load_model_from_config(config, ckpt, verbose=False):
         print("unexpected keys:")
         print(u)
 
-    model.cuda()
+    #model.cuda()
     model.eval()
     return model
 
@@ -164,7 +164,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=None,
         help="the seed (for reproducible sampling)",
     )
     parser.add_argument(
@@ -189,7 +189,8 @@ def main():
         opt.ckpt = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
 
-    seed_everything(opt.seed)
+    if opt.seed is not None:
+        seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
@@ -230,12 +231,14 @@ def main():
 
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
     with torch.no_grad():
-        with precision_scope("cuda"):
+        #with precision_scope("cuda"):
+        if True:
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
+                        print('start {}'.format(prompts))
                         uc = None
                         if opt.scale != 1.0:
                             uc = model.get_learned_conditioning(batch_size * [""])
@@ -257,10 +260,11 @@ def main():
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
 
                         if not opt.skip_save:
-                            for x_sample in x_samples_ddim:
+                            for prompt,x_sample in zip(prompts,x_samples_ddim):
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 Image.fromarray(x_sample.astype(np.uint8)).save(
-                                    os.path.join(sample_path, f"{base_count:05}.jpg"))
+                                    #os.path.join(sample_path, f"{base_count:05}.jpg"))
+                                    os.path.join(sample_path, f"{base_count:05}-{prompt.replace(' ', '-')}.jpg"))
                                 base_count += 1
 
                         if not opt.skip_grid:
